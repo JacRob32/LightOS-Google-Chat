@@ -1,14 +1,61 @@
 # Light Chat
 
-A Google Workspace Chat client for Light Phone III, written in Kotlin with
-Jetpack Compose, MVVM, Coroutines/Flow, Ktor (OkHttp), and Room. No Firebase or
-Google Play Services dependencies are used for networking or notifications.
+A Google Workspace Chat client for Light Phone III. It shows your joined spaces
+and conversations, keeps them on the phone for offline reading, and lets you
+send plain text replies. It does not use Google Play Services or Firebase.
 
-## Build
+This project is new and not affiliated with Google or Light. Contributions and
+questions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-Requirements: JDK 17, Android SDK platform 36/build-tools 36.0.0, and an Android
-34+ device. Set `ANDROID_HOME` or `sdk.dir` in your local, ignored
+## For users
+
+### What works
+
+- Browse joined spaces and direct or group conversations, grouped by thread.
+- Read history offline. Conversations are cached on the phone and refreshed
+  when you ask.
+- Reply to messages and send new text messages. Unsent messages are kept and
+  retried.
+- Your sign-in is remembered across app restarts. It is encrypted on the phone.
+
+### What does not work yet
+
+- No notifications or background sync. Open the app to see new messages.
+- No attachments, cards, reactions, search, or creating spaces.
+- Non-text messages appear as labeled placeholders.
+
+### Install
+
+1. Follow [Light-Phone-Setup.md](Light-Phone-Setup.md) to turn on developer
+   mode and USB debugging, and to connect the phone to your computer.
+2. Download `lightchat-<version>.apk` from the
+   [Releases page](https://github.com/JacRob32/LightOS-Google-Chat/releases).
+3. Install it:
+
+   ```sh
+   adb install -r lightchat-<version>.apk
+   ```
+
+Release APKs are signed with the SDK's public development key. That is enough
+to sideload onto your own phone. It is not a production signature.
+
+### Sign in
+
+[Google-Cloud-Setup.md](Google-Cloud-Setup.md) explains how to create the Google
+Cloud project and OAuth credentials. Then open the app, choose **Connect**, and
+paste your credentials. The accepted formats and what each one means are in
+[Credential formats and sign-in internals](#credential-formats-and-sign-in-internals).
+
+Treat your credentials like a password. Do not share them or paste them into
+issues.
+
+## For developers
+
+Requirements: JDK 17, Android SDK platform 36 and build-tools 36.0.0, and an
+Android 34+ device. Set `ANDROID_HOME` or `sdk.dir` in your local, ignored
 `local.properties`.
+
+### Build
 
 The upstream scaffold, examples, documentation, and SDK implementation live
 entirely in the **ignored** `light-sdk-reference/` checkout. They are not part of
@@ -51,7 +98,18 @@ libraries. Chat does not call the scanner. `verifyGmsFreeRuntime` enforces this
 for both debug and release; a release R8 rule also fails the build if SDK scanner
 code becomes reachable. The ignored SDK source itself is not modified.
 
-## Connect a Workspace account
+### Continuous integration and releases
+
+`.github/workflows/build-apk.yml` runs on pushes to `main`, on pull requests, and
+on manual dispatch. It checks out the pinned `light-sdk` commit, runs the unit
+tests, the GMS-free check, and lint, then builds the debug and release APKs. The
+release APK is uploaded as a workflow artifact.
+
+Pushing a `v*` tag (for example `v1.0.0`) also creates a GitHub release with the
+release APK attached as `lightchat-<tag>.apk`. The tag should match
+`versionName` in `tool/lighttool.toml`.
+
+## Credential formats and sign-in internals
 
 The app has no built-in Google Sign-In (there is no Play Services, and the SDK
 sandbox restricts browser launches). Instead you provide credentials obtained

@@ -1,0 +1,91 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LIGHT_SDK_REPO: https://github.com/lightphone/light-sdk.git
+  LIGHT_SDK_COMMIT: 69216b3cd2e6a45abab63268c4d08800a5aa33da
+
+jobs:
+  build:
+    name: Test and build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out Light Chat
+        uses: actions/checkout@v4
+
+      - name: Check out the pinned Light SDK reference
+        run: |
+          git clone "$LIGHT_SDK_REPO" light-sdk-reference
+          git -C light-sdk-reference checkout "$LIGHT_SDK_COMMIT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "platforms;android-36 build-tools;36.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Run tests, lint, and build
+        run: >-
+          ./gradlew
+          :host-tests:testDebugUnitTest
+          :tool:testDebugUnitTest
+          :tool:verifyGmsFreeRuntime
+          :tool:lintDebug
+          :tool:assembleDebug
+          :tool:assembleRelease
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightchat-release-apk
+          path: tool/build/outputs/apk/release/tool-release.apk
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download APK
+        uses: actions/download-artifact@v4
+        with:
+          name: lightchat-release-apk
+          path: dist
+
+      - name: Create release with the APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          APK="dist/lightchat-${TAG}.apk"
+          mv dist/tool-release.apk "$APK"
+          gh release create "$TAG" "$APK" \
+            --title "Light Chat ${TAG}" \
+            --generate-notes \
+            --verify-tag
