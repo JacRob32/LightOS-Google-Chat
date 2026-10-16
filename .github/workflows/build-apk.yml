@@ -72,6 +72,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out Light Chat
+        uses: actions/checkout@v4
+
       - name: Download APK
         uses: actions/download-artifact@v4
         with:
