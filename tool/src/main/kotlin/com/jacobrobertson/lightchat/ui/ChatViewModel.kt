@@ -6,6 +6,7 @@ import com.jacobrobertson.lightchat.data.ChatRepository
 import com.jacobrobertson.lightchat.data.MessageEntity
 import com.jacobrobertson.lightchat.data.OutboxEntity
 import com.jacobrobertson.lightchat.data.ProfileEntity
+import com.jacobrobertson.lightchat.data.SignIn
 import com.jacobrobertson.lightchat.data.SpaceEntity
 import com.jacobrobertson.lightchat.data.userFacingError
 import com.thelightphone.sdk.LightViewModel
@@ -26,6 +27,7 @@ data class ChatUiState(
     val messages: List<MessageEntity> = emptyList(),
     val outbox: List<OutboxEntity> = emptyList(),
     val connected: Boolean = false,
+    val signIn: SignIn = SignIn.NONE,
     val initialized: Boolean = false,
     val busy: Boolean = false,
     val error: String? = null,
@@ -65,7 +67,13 @@ class ChatViewModel(
             }
         }
         viewModelScope.launch {
+            repository.restore()
+        }
+        viewModelScope.launch {
             repository.connected.collect { connected -> _state.update { it.copy(connected = connected) } }
+        }
+        viewModelScope.launch {
+            repository.signIn.collect { signIn -> _state.update { it.copy(signIn = signIn) } }
         }
     }
 
@@ -75,10 +83,20 @@ class ChatViewModel(
     fun dismissError() = _state.update { it.copy(error = null, notice = null) }
 
     fun connect(token: CharSequence) = runOperation {
-        repository.connect(token.toString())
+        val saved = repository.connect(token.toString())
         _state.update { it.copy(panel = Panel.CHATS, notice = "Connected. Refreshing conversations...") }
         repository.refreshSpaces()
-        _state.update { it.copy(notice = "Connected. Queued messages send only when you choose Retry outbox.") }
+        _state.update {
+            it.copy(
+                notice = if (saved) "Connected. Your sign-in is saved on this phone."
+                else "Connected, but this sign-in could not be saved. You will need to reconnect next time.",
+            )
+        }
+    }
+
+    fun signOut() = runOperation {
+        repository.signOut()
+        _state.update { it.copy(notice = "Signed out. Cached chats are still available.") }
     }
 
     fun openSpace(space: String) {

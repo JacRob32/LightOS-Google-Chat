@@ -20,7 +20,14 @@ val localProperties = java.util.Properties().apply {
     rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
 }
 
+// Optional: keep build output outside a cloud-synced checkout (e.g. iCloud Desktop), where sync
+// conflict copies and stalled file reads can hang Gradle. Pass -Plightchat.buildRoot=/some/dir.
+val buildRoot = providers.gradleProperty("lightchat.buildRoot").orNull
+
 subprojects {
+    if (buildRoot != null) {
+        layout.buildDirectory.set(file("$buildRoot/${path.removePrefix(":").replace(':', '_')}"))
+    }
     tasks.matching { it.name == "check" }.configureEach {
         dependsOn(gradle.includedBuild("plugin").task(":check"))
     }

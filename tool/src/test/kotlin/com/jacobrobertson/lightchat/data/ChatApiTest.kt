@@ -86,6 +86,41 @@ class ChatApiTest {
     }
 
     @Test
+    fun `refresh token exchange posts a form to Google's token endpoint over HTTPS`() = runTest {
+        val engine = MockEngine { request ->
+            assertEquals("oauth2.googleapis.com", request.url.host)
+            assertEquals("/token", request.url.encodedPath)
+            assertEquals("https", request.url.protocol.name)
+            assertEquals(null, request.headers[HttpHeaders.Authorization])
+            val form = (request.body as OutgoingContent.ByteArrayContent).bytes().decodeToString()
+            assertTrue("grant_type=refresh_token" in form)
+            assertTrue("client_id=id" in form && "refresh_token=r%2Fefresh" in form)
+            assertTrue("client_secret=" !in form)
+            respond("""{"access_token":"new-access","expires_in":3599,"token_type":"Bearer"}""",
+                HttpStatusCode.OK, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        KtorChatService(HttpClient(engine) {
+            followRedirects = false
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }).use { api -> assertEquals("new-access", api.refreshAccessToken("id", "", "r/efresh")) }
+    }
+
+    @Test
+    fun `rejected refresh token surfaces only the status code`() = runTest {
+        val engine = MockEngine {
+            respond("""{"error":"invalid_grant","error_description":"secret detail"}""",
+                HttpStatusCode.BadRequest, headersOf(HttpHeaders.ContentType, "application/json"))
+        }
+        KtorChatService(HttpClient(engine) {
+            install(ContentNegotiation) { json(Json { ignoreUnknownKeys = true }) }
+        }).use { api ->
+            val failure = assertFailsWith<ChatApiException> { api.refreshAccessToken("id", "s", "r") }
+            assertEquals(400, failure.status)
+            assertTrue("secret" !in failure.message.orEmpty())
+        }
+    }
+
+    @Test
     fun `profile uses OpenID userinfo to verify account identity`() = runTest {
         service { request ->
             assertEquals("openidconnect.googleapis.com", request.url.host)

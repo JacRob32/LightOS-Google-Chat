@@ -8,11 +8,14 @@ import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
 import io.ktor.client.request.bearerAuth
 import io.ktor.client.request.get
 import io.ktor.client.request.parameter
+import io.ktor.client.request.forms.submitForm
 import io.ktor.client.request.post
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
 import io.ktor.http.contentType
+import io.ktor.http.parameters
 import io.ktor.serialization.kotlinx.json.json
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.time.Instant
@@ -70,9 +73,13 @@ data class MessagesPage(val messages: List<RemoteMessage> = emptyList(), val nex
 @Serializable
 private data class CreateMessage(val text: String, val thread: RemoteThread? = null)
 
+@Serializable
+private data class TokenResponse(@SerialName("access_token") val accessToken: String = "")
+
 class ChatApiException(val status: Int) : Exception("Google request failed (HTTP $status).")
 
 interface ChatService {
+    suspend fun refreshAccessToken(clientId: String, clientSecret: String, refreshToken: String): String
     suspend fun profile(token: String): GoogleProfile
     suspend fun spaces(token: String, pageToken: String): SpacesPage
     suspend fun messages(token: String, space: String, pageToken: String): MessagesPage
@@ -90,6 +97,26 @@ class KtorChatService(
         }
     },
 ) : ChatService, AutoCloseable {
+    override suspend fun refreshAccessToken(
+        clientId: String,
+        clientSecret: String,
+        refreshToken: String,
+    ): String {
+        val response = client.submitForm(
+            "https://oauth2.googleapis.com/token",
+            parameters {
+                append("grant_type", "refresh_token")
+                append("client_id", clientId)
+                if (clientSecret.isNotEmpty()) append("client_secret", clientSecret)
+                append("refresh_token", refreshToken)
+            },
+        )
+        if (response.status.value !in 200..299) throw ChatApiException(response.status.value)
+        return response.body<TokenResponse>().accessToken.also {
+            check(it.isNotBlank()) { "Google returned no access token." }
+        }
+    }
+
     override suspend fun profile(token: String): GoogleProfile =
         client.get("https://openidconnect.googleapis.com/v1/userinfo") {
             bearerAuth(token)

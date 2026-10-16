@@ -10,25 +10,57 @@ import java.util.UUID
 
 class SignInRequiredException : Exception("Connect a Google account to refresh or send.")
 
+class SessionExpiredException : Exception("The saved sign-in is no longer valid.")
+
 class ChatRepository(
     private val database: ChatDatabase,
     private val service: ChatService,
+    private val store: CredentialStore = NoCredentialStore,
     private val now: () -> Long = System::currentTimeMillis,
 ) {
     private val dao = database.chatDao()
     private val mutex = Mutex()
     private var token: String? = null
+    private var credentials: StoredCredentials? = null
     private val _connected = MutableStateFlow(false)
     val connected = _connected.asStateFlow()
+    private val _signIn = MutableStateFlow(SignIn.NONE)
+    val signIn = _signIn.asStateFlow()
     val profile = dao.observeProfile()
     val spaces = dao.observeSpaces()
     val messages = dao.observeMessages()
     val outbox = dao.observeOutbox()
 
-    suspend fun connect(accessToken: String) = mutex.withLock {
-        val candidate = accessToken.trim()
-        require(candidate.isNotEmpty() && candidate.none { it.isWhitespace() }) {
-            "Enter an OAuth access token, without the Bearer prefix."
+    /** Restores a saved sign-in without any network request. */
+    suspend fun restore() = mutex.withLock {
+        val saved = try {
+            store.load()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Unreadable (e.g. the device key was invalidated): drop it, the user signs in again.
+            clearSavedCredentials()
+            null
+        } ?: return@withLock
+        val cached = dao.profile()
+        if (cached == null || cached.subject != saved.subject) {
+            clearSavedCredentials()
+            return@withLock
+        }
+        credentials = saved
+        // A saved refresh token is exchanged on first use; a stored access token may be stale.
+        token = saved.accessToken.takeIf { !saved.refreshable }
+        publishSignIn()
+    }
+
+    /** Returns whether the sign-in was saved on this phone for the next launch. */
+    suspend fun connect(input: String): Boolean = mutex.withLock {
+        val parsed = parseCredentialInput(input)
+        val refresh = parsed as? CredentialInput.Refresh
+        val candidate = when (parsed) {
+            is CredentialInput.AccessToken -> parsed.token
+            is CredentialInput.Refresh ->
+                service.refreshAccessToken(parsed.clientId, parsed.clientSecret, parsed.refreshToken)
         }
         val identity = service.profile(candidate)
         require(identity.sub.isNotBlank() && identity.email.isNotBlank()) {
@@ -39,8 +71,17 @@ class ChatRepository(
             "This token belongs to a different account. Forget the cached account before switching."
         }
         dao.saveProfile(ProfileEntity(subject = identity.sub, email = identity.email))
+        val saved = StoredCredentials(
+            subject = identity.sub,
+            accessToken = candidate.takeIf { refresh == null },
+            clientId = refresh?.clientId,
+            clientSecret = refresh?.clientSecret,
+            refreshToken = refresh?.refreshToken,
+        )
+        credentials = saved
         token = candidate
-        _connected.value = true
+        publishSignIn()
+        persist(saved)
     }
 
     suspend fun refreshSpaces() = authenticated { accessToken ->
@@ -115,20 +156,78 @@ class ChatRepository(
             dao.clearSpaces()
             dao.clearProfile()
         }
+        clearSavedCredentials()
+    }
+
+    /** Removes the saved sign-in but keeps cached chats and unsent messages. */
+    suspend fun signOut() = mutex.withLock { clearSavedCredentials() }
+
+    private suspend fun clearSavedCredentials() {
+        credentials = null
         token = null
-        _connected.value = false
+        publishSignIn()
+        try {
+            store.clear()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            // Memory is already cleared; nothing more can be done for an unwritable store.
+        }
+    }
+
+    private suspend fun persist(saved: StoredCredentials): Boolean = try {
+        store.save(saved)
+        true
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun publishSignIn() {
+        val saved = credentials
+        _signIn.value = when {
+            saved == null -> SignIn.NONE
+            saved.refreshable -> SignIn.REFRESH_TOKEN
+            token != null -> SignIn.ACCESS_TOKEN
+            else -> SignIn.NONE
+        }
+        _connected.value = _signIn.value != SignIn.NONE
+    }
+
+    /** Exchanges the saved refresh token for a new access token, or null when there is none. */
+    private suspend fun renewAccessToken(): String? {
+        val saved = credentials?.takeIf { it.refreshable } ?: return null
+        val renewed = try {
+            service.refreshAccessToken(saved.clientId.orEmpty(), saved.clientSecret.orEmpty(), saved.refreshToken.orEmpty())
+        } catch (failure: ChatApiException) {
+            if (failure.status == 400 || failure.status == 401) {
+                clearSavedCredentials()
+                throw SessionExpiredException()
+            }
+            throw failure
+        }
+        token = renewed
+        return renewed
     }
 
     private suspend fun <T> authenticated(block: suspend (String) -> T): T = mutex.withLock {
-        val accessToken = token ?: throw SignInRequiredException()
+        val accessToken = token ?: renewAccessToken() ?: throw SignInRequiredException()
         try {
             block(accessToken)
         } catch (failure: ChatApiException) {
-            if (failure.status == 401) {
-                token = null
-                _connected.value = false
+            if (failure.status != 401) throw failure
+            val renewed = renewAccessToken()
+            if (renewed == null) {
+                clearSavedCredentials()
+                throw failure
             }
-            throw failure
+            try {
+                block(renewed)
+            } catch (again: ChatApiException) {
+                if (again.status == 401) clearSavedCredentials()
+                throw again
+            }
         }
     }
 }
@@ -148,6 +247,8 @@ internal suspend fun <T> collectPages(fetch: suspend (String) -> Pair<List<T>, S
 
 fun userFacingError(failure: Throwable): String = when (failure) {
     is SignInRequiredException -> "Offline cache is available. Connect a token to refresh or send."
+    is SessionExpiredException ->
+        "Your saved sign-in was revoked or expired. Connect again; cached chats are still available."
     is ChatApiException -> when (failure.status) {
         401 -> "Your token expired or was revoked. Connect a fresh token; cached chats are still available."
         403 -> "Google denied access. Check Chat API enablement, OAuth scopes, and Workspace policy."

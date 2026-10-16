@@ -213,6 +213,164 @@ class ChatRepositoryTest {
     }
 
     @Test
+    fun `access token sign in survives app restart and works without re-entering it`() = runTest {
+        val store = FakeCredentialStore()
+        assertTrue(ChatRepository(database, service, store).apply { connect("saved-token") }.connected.value)
+        assertEquals("saved-token", store.saved?.accessToken)
+
+        val restarted = ChatRepository(database, service, store)
+        assertFalse(restarted.connected.value)
+        restarted.restore()
+        assertTrue(restarted.connected.value)
+        assertEquals(SignIn.ACCESS_TOKEN, restarted.signIn.value)
+        restarted.refreshSpaces()
+        assertEquals(listOf("saved-token"), service.tokensUsed)
+    }
+
+    @Test
+    fun `refresh token sign in is renewed automatically after restart`() = runTest {
+        val store = FakeCredentialStore()
+        val first = ChatRepository(database, service, store)
+        assertTrue(first.connect("client-id client-secret refresh-token"))
+        assertEquals(SignIn.REFRESH_TOKEN, first.signIn.value)
+        assertEquals("refresh-token", store.saved?.refreshToken)
+
+        service.renewedToken = "second-access-token"
+        val restarted = ChatRepository(database, service, store)
+        restarted.restore()
+        assertTrue(restarted.connected.value)
+        restarted.refreshSpaces()
+        assertEquals("second-access-token", service.tokensUsed.last())
+        assertNull(store.saved?.accessToken)
+        assertEquals("refresh-token", store.saved?.refreshToken)
+    }
+
+    @Test
+    fun `expired access token is renewed once and the request is retried`() = runTest {
+        val store = FakeCredentialStore()
+        val repo = ChatRepository(database, service, store)
+        repo.connect("{\"client_id\":\"id\",\"client_secret\":\"secret\",\"refresh_token\":\"refresh\",\"type\":\"authorized_user\"}")
+        service.renewedToken = "fresh-token"
+        // The token obtained at connect time (the initial renewal) now expires.
+        service.expiredTokens += "renewed-token"
+        repo.refreshSpaces()
+        assertEquals(listOf("renewed-token", "fresh-token"), service.tokensUsed)
+        assertTrue(repo.connected.value)
+        assertEquals(2, service.refreshCalls)
+    }
+
+    @Test
+    fun `revoked refresh token clears saved sign in but keeps cached chats`() = runTest {
+        val store = FakeCredentialStore()
+        val repo = ChatRepository(database, service, store)
+        repo.connect("id secret refresh")
+        repo.refreshSpaces()
+        repo.refreshMessages(space)
+        service.expiredTokens += "renewed-token"
+        service.refreshFailure = ChatApiException(400)
+        assertFailsWith<SessionExpiredException> { repo.refreshMessages(space) }
+        assertFalse(repo.connected.value)
+        assertNull(store.saved)
+        assertEquals(1, repo.messages.first().size)
+        assertTrue(userFacingError(SessionExpiredException()).contains("revoked"))
+    }
+
+    @Test
+    fun `transient network failure while renewing keeps the saved sign in`() = runTest {
+        val store = FakeCredentialStore()
+        val repo = ChatRepository(database, service, store)
+        repo.connect("id secret refresh")
+        service.expiredTokens += "renewed-token"
+        service.refreshFailure = java.io.IOException("offline")
+        assertFailsWith<java.io.IOException> { repo.refreshSpaces() }
+        assertTrue(repo.connected.value)
+        assertNotNull(store.saved?.refreshToken)
+    }
+
+    @Test
+    fun `expired access only token clears the saved sign in`() = runTest {
+        val store = FakeCredentialStore()
+        val repo = ChatRepository(database, service, store)
+        repo.connect("short-lived")
+        service.expiredTokens += "short-lived"
+        assertFailsWith<ChatApiException> { repo.refreshSpaces() }
+        assertFalse(repo.connected.value)
+        assertNull(store.saved)
+    }
+
+    @Test
+    fun `saved sign in for a different account is discarded on restore`() = runTest {
+        val store = FakeCredentialStore()
+        ChatRepository(database, service, store).connect("token-for-person")
+        store.saved = store.saved?.copy(subject = "someone-else")
+        val restarted = ChatRepository(database, service, store)
+        restarted.restore()
+        assertFalse(restarted.connected.value)
+        assertNull(store.saved)
+    }
+
+    @Test
+    fun `unreadable saved sign in is discarded instead of crashing`() = runTest {
+        val store = FakeCredentialStore()
+        ChatRepository(database, service, store).connect("token")
+        store.loadFailure = java.security.GeneralSecurityException("key invalidated")
+        val restarted = ChatRepository(database, service, store)
+        restarted.restore()
+        assertFalse(restarted.connected.value)
+        assertNull(store.saved)
+    }
+
+    @Test
+    fun `sign in still works for this session when saving fails`() = runTest {
+        val store = FakeCredentialStore().apply { saveFailure = java.io.IOException("disk") }
+        val repo = ChatRepository(database, service, store)
+        assertFalse(repo.connect("token"))
+        assertTrue(repo.connected.value)
+        repo.refreshSpaces()
+    }
+
+    @Test
+    fun `sign out removes the saved sign in but keeps chats and the outbox`() = runTest {
+        val store = FakeCredentialStore()
+        val repo = ChatRepository(database, service, store)
+        repo.connect("token")
+        repo.refreshSpaces()
+        repo.refreshMessages(space)
+        repo.enqueue(space, null, "unsent")
+        repo.signOut()
+        assertFalse(repo.connected.value)
+        assertEquals(SignIn.NONE, repo.signIn.value)
+        assertNull(store.saved)
+        assertEquals(1, repo.messages.first().size)
+        assertEquals(1, repo.outbox.first().size)
+    }
+
+    @Test
+    fun `forgetting the account also removes the saved sign in`() = runTest {
+        val store = FakeCredentialStore()
+        val repo = ChatRepository(database, service, store)
+        repo.connect("id secret refresh")
+        repo.forgetAccount()
+        assertNull(store.saved)
+        assertEquals(SignIn.NONE, repo.signIn.value)
+    }
+
+    @Test
+    fun `credential input parsing accepts supported formats and never echoes secrets`() {
+        assertTrue(parseCredentialInput(" abc ") is CredentialInput.AccessToken)
+        val refresh = parseCredentialInput("id secret token") as CredentialInput.Refresh
+        assertEquals("token", refresh.refreshToken)
+        val json = parseCredentialInput("{\"client_id\":\"i\",\"refresh_token\":\"r\"}") as CredentialInput.Refresh
+        assertEquals("", json.clientSecret)
+        val failure = assertFailsWith<IllegalArgumentException> { parseCredentialInput("two parts") }
+        assertFalse(failure.message.orEmpty().contains("parts"))
+        assertFailsWith<IllegalArgumentException> { parseCredentialInput("{not json") }
+        assertFailsWith<IllegalArgumentException> { parseCredentialInput("{\"client_id\":\"i\"}") }
+        assertFailsWith<IllegalArgumentException> { parseCredentialInput("   ") }
+        assertFalse(StoredCredentials("s", "secret-access", "i", "c", "secret-refresh").toString().contains("secret"))
+    }
+
+    @Test
     fun `database survives closing and reopening without persisting the token`() = runTest {
         val app = RuntimeEnvironment.getApplication()
         val name = "persistence-test.db"
@@ -252,13 +410,58 @@ private class FakeChatService : ChatService {
     var messagePages: (String) -> MessagesPage = { MessagesPage(listOf(remoteMessage())) }
     var sendFailure: Exception? = null
     val sent = mutableListOf<OutboxEntity>()
+    val expiredTokens = mutableSetOf<String>()
+    val tokensUsed = mutableListOf<String>()
+    var renewedToken = "renewed-token"
+    var refreshFailure: Exception? = null
+    var refreshCalls = 0
+
+    private fun use(token: String) {
+        tokensUsed += token
+        if (token in expiredTokens) throw ChatApiException(401)
+    }
+
+    override suspend fun refreshAccessToken(clientId: String, clientSecret: String, refreshToken: String): String {
+        refreshCalls++
+        refreshFailure?.let { throw it }
+        return renewedToken
+    }
 
     override suspend fun profile(token: String) = identity
-    override suspend fun spaces(token: String, pageToken: String) = spacePages(pageToken)
-    override suspend fun messages(token: String, space: String, pageToken: String) = messagePages(pageToken)
+    override suspend fun spaces(token: String, pageToken: String): SpacesPage {
+        use(token)
+        return spacePages(pageToken)
+    }
+
+    override suspend fun messages(token: String, space: String, pageToken: String): MessagesPage {
+        use(token)
+        return messagePages(pageToken)
+    }
+
     override suspend fun send(token: String, message: OutboxEntity): RemoteMessage {
+        use(token)
         sent += message
         sendFailure?.let { throw it }
         return remoteMessage("client-${message.id}", message.text)
+    }
+}
+
+private class FakeCredentialStore : CredentialStore {
+    var saved: StoredCredentials? = null
+    var loadFailure: Exception? = null
+    var saveFailure: Exception? = null
+
+    override suspend fun load(): StoredCredentials? {
+        loadFailure?.let { throw it }
+        return saved
+    }
+
+    override suspend fun save(credentials: StoredCredentials) {
+        saveFailure?.let { throw it }
+        saved = credentials
+    }
+
+    override suspend fun clear() {
+        saved = null
     }
 }

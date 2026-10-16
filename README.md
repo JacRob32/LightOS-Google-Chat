@@ -34,6 +34,17 @@ The debug APK is `tool/build/outputs/apk/debug/tool-debug.apk`. The upstream
 development signing certificate is for sideload testing, not production signing.
 Follow Light's distribution/signing process before distributing a release.
 
+**Cloud-synced folders:** if this checkout lives in iCloud Drive (e.g. the macOS
+Desktop), sync can create `* 2.class` conflict copies in `build/` folders and
+stall Gradle's file reads so the build hangs. Keep build output elsewhere:
+
+```sh
+./gradlew -Plightchat.buildRoot="$HOME/.cache/lightchat-build" \
+  --project-cache-dir "$HOME/.cache/lightchat-build/.gradle" :tool:assembleDebug
+```
+
+With that option the APK is under `$HOME/.cache/lightchat-build/tool/outputs/`.
+
 The SDK's optional QR scanner dependencies (ML Kit and CameraX's ML Kit adapter)
 are excluded from this tool, removing their transitive Firebase/Play Services
 libraries. Chat does not call the scanner. `verifyGmsFreeRuntime` enforces this
@@ -42,34 +53,52 @@ code becomes reachable. The ignored SDK source itself is not modified.
 
 ## Connect a Workspace account
 
-This initial version deliberately uses **short-lived, manually supplied user
-OAuth access tokens**, not Google Sign-In, a service account, a bundled client
-secret, or a fake sign-in screen. The SDK sandbox restricts arbitrary activity/
-browser launches; a production browser-based sign-in/refresh-token flow needs a
-separately designed external authorization integration.
+The app has no built-in Google Sign-In (there is no Play Services, and the SDK
+sandbox restricts browser launches). Instead you provide credentials obtained
+through a trusted OAuth flow on another computer, and the app **remembers them
+across app restarts**, encrypted on the phone. A real browser sign-in inside the
+app would need a separately designed external authorization integration.
 
 1. Enable the Google Chat API in a Google Cloud project. Configure the Chat app
    and OAuth consent screen and add your user as a test user if applicable.
    Workspace administrators may also need to approve the application/scopes.
-2. Through a trusted OAuth authorization-code flow on a separate computer,
-   obtain a **user access token** with these scopes:
+2. Through an OAuth authorization-code flow on a separate computer, obtain
+   credentials with these scopes:
    - `openid`
    - `email`
    - `https://www.googleapis.com/auth/chat.spaces.readonly`
    - `https://www.googleapis.com/auth/chat.messages`
-3. Choose **Connect** or **Account → Enter access token** on the phone and enter
-   only the token, without a `Bearer` prefix. The token editor displays the
-   credential while entering it; use it privately. Tokens are never put in
-   source, logs, Room, preferences, or saved-instance-state.
-4. Google OpenID userinfo verifies the account subject/email before a token is
-   accepted. The verified subject must match the locally cached account. Choose
-   **Forget account** before switching users.
-5. Open a conversation to download its messages. Refresh is explicit. Token
-   expiration does not remove cached messages; reconnect with a fresh token.
+3. Choose **Connect** or **Account → Sign in** and enter **one** of:
+   - **Lasting sign-in (recommended):** `client_id client_secret refresh_token`
+     separated by spaces (the client secret may be omitted only if your OAuth
+     client type has none, in which case use the JSON form), or the standard
+     "authorized user" JSON (`client_id`, `client_secret`, `refresh_token`). The
+     app exchanges the refresh token for short-lived access tokens
+     automatically, so you stay signed in until you sign out or Google revokes
+     the grant.
+   - **Access token only:** a single access token. It is remembered too, but
+     Google expires it about an hour after issuing it; after that you must
+     enter a new one.
+4. Google OpenID userinfo verifies the account subject/email before anything is
+   accepted or saved. The verified subject must match the locally cached
+   account. Choose **Forget account** before switching users.
+5. Open a conversation to download its messages. Refresh is explicit. An
+   expired sign-in never removes cached messages.
 
-Tokens live only in the screen/ViewModel session, so reconnect after the screen
-is destroyed or the process exits. Do not put real tokens in commits or issue
-reports. API access must be tested with your own authorized Workspace account.
+**How credentials are stored:** they are serialized, encrypted with AES-256-GCM
+using a non-exportable key in the Android Keystore, and kept in the app's
+private preferences (`EncryptedCredentialStore`). No plaintext token, client
+secret, or refresh token is written to disk, logs, Room, or saved-instance
+state; the on-device test checks the preferences file for plaintext. If the
+Keystore key is invalidated or the data is unreadable or tampered with (for
+example after a device restore), the saved sign-in is discarded and you sign in
+again. With a refresh token the short-lived access token is kept only in memory
+and renewed on first use. **Sign out** deletes the saved credentials but keeps
+cached chats and unsent messages; **Forget account** deletes everything.
+Treat a refresh token like a password: it grants lasting access until revoked
+at <https://myaccount.google.com/permissions>. Do not put real credentials in
+commits or issue reports. API access must be tested with your own authorized
+Workspace account.
 
 References: [user authentication](https://developers.google.com/workspace/chat/authenticate-authorize-chat-user),
 [list spaces](https://developers.google.com/workspace/chat/api/reference/rest/v1/spaces/list),
@@ -131,6 +160,10 @@ explicitly identified rather than rendered as blank text.
 Tests use a real Room database under Robolectric and a Ktor MockEngine. They
 cover offline reopening, pagination and partial failure, reconciliation,
 account isolation/forgetting, outbox retries, revoked spaces, token expiration,
-UTF-8 size limits, HTTP request shapes, thread ordering, and monochrome colors.
+saved sign-in restore after a restart, automatic access-token renewal, revoked
+refresh tokens, sign-out, UTF-8 size limits, HTTP request shapes, thread
+ordering, and monochrome colors. `EncryptedCredentialStoreTest` runs on a real
+device/emulator (`./gradlew :host-tests:connectedDebugAndroidTest`) because it
+needs the genuine Android Keystore.
 Live OAuth/Workspace authorization and actual Light Phone behavior require an
 authorized account and physical device/emulator; unit tests do not verify them.

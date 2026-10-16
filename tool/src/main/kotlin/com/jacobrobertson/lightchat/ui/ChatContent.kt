@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.jacobrobertson.lightchat.data.MessageEntity
 import com.jacobrobertson.lightchat.data.OutboxEntity
+import com.jacobrobertson.lightchat.data.SignIn
 import com.jacobrobertson.lightchat.data.SpaceEntity
 import com.thelightphone.sdk.rememberKeyboardOptions
 import com.thelightphone.sdk.ui.LightColors
@@ -228,12 +229,22 @@ private fun Footer(state: ChatUiState, viewModel: ChatViewModel) {
 private fun Account(state: ChatUiState, viewModel: ChatViewModel, modifier: Modifier) {
     Column(modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Copy(state.profile?.email ?: "No account connected")
-        Copy(if (state.connected) "Connected for this session." else "Offline. Cached chats remain on this phone.", small = true)
-        Action(if (state.connected) "Replace token" else "Enter access token", enabled = !state.busy, onClick = viewModel::tokenEntry)
-        Copy("Use a user OAuth access token with openid, email, chat.spaces.readonly and chat.messages scopes.", small = true)
-        Copy("The token stays in memory and is lost when this screen is destroyed. It is sent only to Google's HTTPS endpoints.", small = true)
+        Copy(
+            when (state.signIn) {
+                SignIn.REFRESH_TOKEN -> "Signed in. Saved encrypted on this phone and renewed automatically."
+                SignIn.ACCESS_TOKEN -> "Signed in. Saved encrypted on this phone, but an access token expires about an hour after Google issues it."
+                SignIn.NONE -> "Not signed in. Cached chats remain on this phone."
+            },
+            small = true,
+        )
+        Action(if (state.connected) "Replace sign-in" else "Sign in", enabled = !state.busy, onClick = viewModel::tokenEntry)
+        Copy("Enter an access token, or for lasting sign-in enter: client_id client_secret refresh_token (separated by spaces). Authorized-user JSON also works.", small = true)
+        Copy("Scopes: openid, email, chat.spaces.readonly and chat.messages. Credentials are encrypted with a key that never leaves this phone's Keystore and are sent only to Google's HTTPS endpoints.", small = true)
         Copy("Chats and unsent messages are stored in this app's private database. A refresh reconciles edited and deleted messages in the open conversation.", small = true)
         Copy("To switch accounts, forget this account first. No background notifications or automatic refresh.", small = true)
+        if (state.connected) {
+            Action("Sign out", enabled = !state.busy, onClick = viewModel::signOut)
+        }
         if (state.profile != null) {
             Action("Forget account...", enabled = !state.busy, onClick = viewModel::confirmForget)
         }
@@ -261,7 +272,7 @@ private fun Editor(state: ChatUiState, viewModel: ChatViewModel, onBack: () -> U
         }
     }
     LightTextInputEditor(
-        title = if (isToken) "OAuth access token" else if (state.thread == null) "New message" else "Reply",
+        title = if (isToken) "Sign in" else if (state.thread == null) "New message" else "Reply",
         state = input,
         keyboardOptionsFlow = rememberKeyboardOptions(),
         submitLabel = if (isToken) "CONNECT" else "SEND",

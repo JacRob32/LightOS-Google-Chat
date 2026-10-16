@@ -6,6 +6,7 @@ import androidx.compose.runtime.getValue
 import com.jacobrobertson.lightchat.data.ChatDatabase
 import com.jacobrobertson.lightchat.data.ChatRepository
 import com.jacobrobertson.lightchat.data.KtorChatService
+import com.jacobrobertson.lightchat.security.EncryptedCredentialStore
 import com.jacobrobertson.lightchat.ui.ChatContent
 import com.jacobrobertson.lightchat.ui.ChatViewModel
 import com.thelightphone.sdk.InitialScreen
@@ -20,7 +21,8 @@ class ChatScreen(activity: SealedLightActivity) : LightScreen<Unit, ChatViewMode
     override fun createViewModel(): ChatViewModel {
         val database = lightContext.buildDatabase(ChatDatabase::class.java, "google-chat.db")
         val service = KtorChatService()
-        return ChatViewModel(ChatRepository(database, service)) {
+        val store = EncryptedCredentialStore(lightContext.dataStore)
+        return ChatViewModel(ChatRepository(database, service, store)) {
             service.close()
             database.close()
         }
